@@ -16,6 +16,9 @@ import {
   TIMEOUT_SELECTOR,
   PARAMETERS,
 } from "./utils/constants";
+import { expect } from "playwright/test";
+import { runStep, stepResults } from "./utils/runStep";
+import { takeScreenshot } from "./utils/takeScreenshot";
 
 /**
  * AWS Lambda handler function for automated web screenshot capture and S3 storage.
@@ -125,6 +128,7 @@ export const handler = async (
   let screenshotUrl: string | null = null;
   let statusCode = 200;
   let message = "Success";
+  stepResults.length = 0;
 
   try {
     // Ensure necessary directories exist
@@ -147,63 +151,237 @@ export const handler = async (
     page.setDefaultNavigationTimeout(TIMEOUT_NAVIGATION);
 
     // Navigate to Aegean Air page
-    await page.goto(PARAMETERS.url, {
-      waitUntil: "domcontentloaded",
-      timeout: TIMEOUT_NAVIGATION,
-    });
+    await runStep(
+      "Navigate to Aegean",
+      async () => {
+        await page.goto(PARAMETERS.url, {
+          waitUntil: "domcontentloaded",
+          timeout: TIMEOUT_NAVIGATION,
+        });
+      },
+      page
+    );
 
     // Wait for the specific selector to be visible
-    await page.waitForSelector(PARAMETERS.selector, {
-      state: "visible",
-      timeout: TIMEOUT_SELECTOR,
-    });
+    await runStep(
+      "Wait for booking component",
+      async () => {
+        await page.waitForSelector(PARAMETERS.selector, {
+          state: "visible",
+          timeout: TIMEOUT_SELECTOR,
+        });
+      },
+      page
+    );
 
-    // Take screenshot of the specific element
-    const element = await page.$(PARAMETERS.selector);
+    // Validate the presence of the trip type selector (Round-trip/One-way/multicity)
+    // await runStep(
+    //     "Validate trip type selectors (Round-trip, One-way, Multi-City)",
+    //     async () => {
+    //         const toggleTripTypeButton = page.getByRole("button", { name: /Round-trip/i });
+    //         await expect(toggleTripTypeButton).toBeVisible({ timeout: TIMEOUT_SELECTOR });
+    //         await toggleTripTypeButton.click();
 
-    if (!element) {
-      throw new Error("Flight booking component not found");
-    }
+    //         // Aseguramos que aparezca el radiogroup
+    //         const radioGroup = page.locator('div[role="radiogroup"]');
+    //         await expect(radioGroup).toBeVisible({ timeout: TIMEOUT_SELECTOR });
 
-    const screenshotPath = "/tmp/screenshots/flight-booking-component.png";
-    await element.screenshot({ path: screenshotPath });
+    //         // Localizamos los radios y los filtramos por texto visible dentro del span
+    //         const roundTripOption = radioGroup.locator('div[role="radio"]').filter({ hasText: "Round-trip" });
+    //         const oneWayOption = radioGroup.locator('div[role="radio"]').filter({ hasText: "One-way" });
+    //         const multiCityOption = radioGroup.locator('div[role="radio"]').filter({ hasText: /Multi[- ]?City/i });
 
-    // Generate unique filename with timestamp
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const filename = `${
-      (process.env.PREFIX, "")
-    }-aegean-flight-booking-${timestamp}.png`;
+    //         await expect(roundTripOption).toBeVisible();
+    //         await expect(oneWayOption).toBeVisible();
+    //         await expect(multiCityOption).toBeVisible();
 
-    // Verify that the file exists before uploading
-    try {
-      await fs.access(screenshotPath);
-    } catch (error: any) {
-      console.error(`Error accessing screenshot file: ${error.message}`);
-      throw new Error(`Screenshot file not found at ${screenshotPath}`);
-    }
+    //         // One-way
+    //         await oneWayOption.click();
+    //         await expect(oneWayOption).toHaveAttribute("aria-checked", "true");
 
-    // Initialize S3 client
-    const s3Client = new S3Client({
-      region: process.env.AWS_REGION || "us-east-2",
-    });
-    const bucketName =
-      process.env.AWS_S3_BUCKET || "technical-playwright-result";
+    //         // Round-trip
+    //         await roundTripOption.click();
+    //         await expect(roundTripOption).toHaveAttribute("aria-checked", "true");
 
-    // Upload screenshot to S3
-    const fileContent = await fs.readFile(screenshotPath);
+    //         // Multi-City
+    //         await multiCityOption.click();
+    //         await expect(multiCityOption).toHaveAttribute("aria-checked", "true");
 
-    const params = {
-      Bucket: bucketName,
-      Key: `screenshots/${filename}`,
-      Body: fileContent,
-      ContentType: "image/png",
-    };
+    //         const doneButton = page.locator('button[data-att="done"]');
+    //         if (await doneButton.isVisible()) {
+    //         await doneButton.click();
+    //         }
+    //     },
+    //     page
+    //  );
 
-    const uploadCommand = new PutObjectCommand(params);
-    await s3Client.send(uploadCommand);
+    // Validate that all passenger input fields (Adults, Children, Infants)
+    await runStep(
+      "Validate passengers and travel class selector",
+      async () => {
+        const buttons = page.getByRole("button", { name: /Economy/i });
+        const passengerClassButton = await buttons
+          .filter({
+            hasText: /Passenger/i,
+          })
+          .first();
+        await expect(passengerClassButton).toBeVisible({ timeout: 30000 });
+        await passengerClassButton.click();
 
-    // Generate URL for the uploaded screenshot
-    screenshotUrl = `https://${bucketName}.s3.amazonaws.com/screenshots/${filename}`;
+        const travelClassLabel = page.locator("label", {
+          hasText: /^Travel class$/,
+        });
+        await expect(travelClassLabel).toBeVisible({ timeout: 30000 });
+        await expect(passengerClassButton).toHaveText(/Economy/);
+
+        const adultGroup = page.locator("div#age1");
+        await expect(adultGroup).toBeVisible();
+        await expect(page.locator("#age1-value")).toHaveText("1");
+        await expect(page.locator("#age1-increase")).toBeEnabled();
+        await expect(page.locator("#age1-decrease")).toHaveClass(
+          /cursor-not-allowed/
+        );
+
+        await page.locator("#age1-increase").click();
+        await expect(page.locator("#age1-value")).toHaveText("2");
+
+        const childrenGroup = page.locator("div#age2");
+        await expect(childrenGroup).toBeVisible();
+        await expect(page.locator("#age2-value")).toHaveText("0");
+        await expect(page.locator("#age2-increase")).toBeEnabled();
+
+        await page.locator("#age2-increase").click();
+        await expect(page.locator("#age2-value")).toHaveText("1");
+
+        const infantsGroup = page.locator("div#age4");
+        await expect(infantsGroup).toBeVisible();
+        await expect(page.locator("#age4-value")).toHaveText("0");
+        await expect(page.locator("#age4-increase")).toBeEnabled();
+
+        await page.locator("#age4-increase").click();
+        await expect(page.locator("#age4-value")).toHaveText("1");
+
+        await passengerClassButton.click();
+      },
+      page
+    );
+
+    // Validate operability of origin and destination input fields:
+    await runStep(
+      "Select origin and destination airports",
+      async () => {
+        // ORIGIN
+        const originContainer = page.locator('[data-att="f1_origin"]');
+        const originButton = originContainer.locator("button:visible").first();
+
+        await expect(originButton).toBeVisible();
+        await originButton.click();
+
+        const originInput = page.locator(
+          'input[aria-label="fc-booking-origin-aria-label"]'
+        );
+        await originInput.click();
+        await originInput.fill("ISTANBUL (IST)");
+
+        // DESTINATION
+        const destinationContainer = page.locator(
+          '[data-att="f1_destination"]'
+        );
+        const destinationButton = destinationContainer
+          .locator("button:visible")
+          .first();
+
+        await expect(destinationButton).toBeVisible();
+        await destinationButton.click();
+
+        const destinationInput = page.locator(
+          'input[aria-label="fc-booking-destination-aria-label"]'
+        );
+        await destinationInput.click();
+        await destinationInput.fill("ATHENS (ATH)");
+      },
+      page
+    );
+
+    // Validate departure and return date input fields operability
+    await runStep(
+      "Validate departure and return date selectors (select tomorrow and day after tomorrow)",
+      async () => {
+        // DEPARTURE
+        const departureButton = page.locator(
+          '[data-att="start-date-toggler"] button[aria-haspopup="dialog"]'
+        );
+        await expect(departureButton).toBeVisible();
+        await departureButton.click();
+
+        await page
+          .locator('[role="dialog"]')
+          .waitFor({ state: "visible", timeout: 5000 });
+
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+
+        const yyyyOut = tomorrow.getFullYear();
+        const mmOut = String(tomorrow.getMonth() + 1).padStart(2, "0");
+        const ddOut = String(tomorrow.getDate()).padStart(2, "0");
+
+        const departureSelector = `button[data-att="day-${yyyyOut}-${mmOut}-${ddOut}"]`;
+        const departureDayButton = page.locator(departureSelector);
+        await departureDayButton.click();
+
+        // RETURN
+        const returnButton = page.locator(
+          '[data-att="end-date-toggler"] button[aria-haspopup="dialog"]'
+        );
+        await expect(returnButton).toBeVisible();
+        await returnButton.click();
+
+        await page
+          .locator('[role="dialog"]')
+          .waitFor({ state: "visible", timeout: 5000 });
+
+        const dayAfterTomorrow = new Date();
+        dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 2);
+
+        const yyyyRet = dayAfterTomorrow.getFullYear();
+        const mmRet = String(dayAfterTomorrow.getMonth() + 1).padStart(2, "0");
+        const ddRet = String(dayAfterTomorrow.getDate()).padStart(2, "0");
+
+        const returnSelector = `button[data-att="day-${yyyyRet}-${mmRet}-${ddRet}"]`;
+        const returnDayButton = page.locator(returnSelector);
+        await returnDayButton.click();
+      },
+      page
+    );
+
+    // Validate search button visibility and operability
+    await runStep(
+      "Validate search button is enabled and contains 'search'",
+      async () => {
+        const SEARCH_BUTTON_SELECTOR = '[data-att="search"]';
+
+        // Esperar a que el botón sea visible
+        await page.waitForSelector(SEARCH_BUTTON_SELECTOR, {
+          state: "visible",
+          timeout: TIMEOUT_SELECTOR,
+        });
+
+        // Validar que no esté deshabilitado (usamos getAttribute sobre 'aria-disabled')
+        const isAriaDisabled = await page.getAttribute(
+          SEARCH_BUTTON_SELECTOR,
+          "aria-disabled"
+        );
+        expect(isAriaDisabled).toBe("false");
+
+        // Validar que contenga el texto 'search'
+        const buttonText = await page.textContent(SEARCH_BUTTON_SELECTOR);
+        expect(buttonText?.toLowerCase()).toContain("search");
+      },
+      page
+    );
+
+    // Takes a screenshot of the current page state, uploads it to S3, and returns the public URL
+    screenshotUrl = await takeScreenshot(page, "aegean-flight-booking");
   } catch (error: any) {
     console.error("Error:", error);
     console.error("Stack trace:", error.stack);
@@ -231,6 +409,7 @@ export const handler = async (
       timestamp: new Date().toISOString(),
       screenshotUrl,
       event,
+      steps: stepResults,
     }),
   };
   return response;
